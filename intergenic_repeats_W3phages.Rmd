@@ -1,0 +1,409 @@
+---
+title: "W3 Intergenic Repeat Investigation"
+output: html_notebook
+---
+
+# install and load packages
+```{r, eval = FALSE}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("Biostrings")
+# BiocManager::install("GenomicRanges")
+# install.packages("tidyverse")
+# install.packages("ggseqlogo")
+
+library(Biostrings)
+library(GenomicRanges)
+library(tidyverse)
+library(ggseqlogo)
+```
+
+# read in J1 genomes as DNAStringSet object
+## use original fasta, not reoriented
+```{r}
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/pharokka_bakta/fastas/")
+
+seqlist <- lapply(list.files(), function(y) {
+  seq_ <- Biostrings::readDNAStringSet(filepath = y,
+                               format = "fasta")[[1]] |>
+    as.character()
+  names(seq_) <- gsub(x = y,
+                      pattern = ".fna",
+                      replacement = "")
+  seq_
+}) |> unlist()
+
+widths <- sapply(seqlist, function(x) sum(width(x)))
+J1_DNAStringSet <- Biostrings::DNAStringSet(x = seqlist, width = widths,
+                                            start = 1, end = NA,
+                                            use.names = TRUE)
+rm(widths)
+rm(seqlist)
+```
+
+# read in J1 genomes as DNAbin object -- NOT USED
+```{r}
+# combined in bash
+# cat fastas_reoriented/*.fasta > J1_all_reoriented.fasta
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/pharokka_bakta/")
+J1_DNAbin <- ape::read.dna(file = "J1_all_reoriented.fasta", format = "fasta", as.matrix = FALSE)
+```
+
+# kmer counting -- NOT USED
+```{r}
+#J1_reps <- DECIPHER::DetectRepeats(J1_genomes, type = "interspersed")
+J1_reps <- kmer::kcount(J1_DNAbin, k = 10)
+```
+
+# read in and combine bakta gff
+```{r}
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/pharokka_bakta/gffs/")
+
+acc2name <- readr::read_tsv(file = "../acc2name.txt",
+                            col_names = c("seqname", "phage"))
+
+J1_profile <- 
+  lapply(list.files(), function(x) {
+    readr::read_tsv(x, comment = "#",
+                    col_names = c("seqname","source","feature","start","end",
+                                  "score","strand","frame","attribute"),
+                    col_types = list(seqname = "c",
+                                     source = "c",
+                                     feature = "c",
+                                     start = "d",
+                                     end = "d",
+                                     score = "d",
+                                     strand = "c",
+                                     frame = "c",
+                                     attribute = "c")) |>
+      dplyr::filter(!is.na(source))
+}) |>
+  dplyr::bind_rows() |>
+  dplyr::left_join(acc2name, by = "seqname")
+
+rmeq <- function(y){gsub(x = y, pattern = ".*=", replacement = "")}
+
+J1_CDS <- 
+  dplyr::filter(J1_profile, feature == "CDS") |>
+  tidyr::separate(col = attribute,
+                  sep = ";",
+                  into = c("ID","phrog","top_hit","locus_tag","fxn","product")) |>
+  dplyr::mutate(ID = rmeq(ID),
+                phrog = rmeq(phrog),
+                top_hit = rmeq(top_hit),
+                locus_tag = rmeq(locus_tag),
+                fxn = rmeq(fxn),
+                product = rmeq(product))
+```
+
+# get coords for genes and intergenic sequences, pull sequences
+```{r}
+# exclude sequence less than 10 nt
+
+require(Biostrings)
+
+J1_intragenic <-
+  J1_CDS |>
+  dplyr::select(seqname, start, end) |> dplyr::group_by(seqname) |>
+  dplyr::right_join(acc2name, by = "seqname") |>
+  apply(MARGIN = 1, FUN = function(line) {
+    seqn <- which(names(J1_DNAStringSet) == line[1])
+    seqm <- subseq(J1_DNAStringSet[[seqn]],
+                   start = as.numeric(line[2]),
+                   end = as.numeric(line[3]))
+    c(line, sequence = as.character(seqm))
+  }) |> rbind() |> as.data.frame() |> t() |> tidyr::as_tibble() |>
+  dplyr::mutate(start = as.integer(start), end = as.integer(end)) |>
+  dplyr::mutate(name = paste(phage,start,end,sep="_"))
+
+# note the filter based on sequence length, last line
+J1_intergenic <-
+  J1_CDS |>
+  dplyr::select(seqname, start, end) |> dplyr::group_by(seqname) |> 
+  dplyr::mutate(istart = end + 1, iend = dplyr::lead(start) - 1) |>
+  dplyr::filter(istart < iend) |> dplyr::ungroup() |>
+  dplyr::select(-c(start,end)) |> dplyr::right_join(acc2name, by = "seqname") |>
+  apply(MARGIN = 1, FUN = function(line) {
+    seqn <- which(names(J1_DNAStringSet) == line[1])
+    seqm <- subseq(J1_DNAStringSet[[seqn]],
+                   start = as.numeric(line[2]),
+                   end = as.numeric(line[3]))
+    c(line, sequence = as.character(seqm))
+  }) |> rbind() |> as.data.frame() |> t() |> tidyr::as_tibble() |>
+  dplyr::mutate(istart = as.integer(istart), iend = as.integer(iend)) |>
+  dplyr::mutate(name = paste(phage,istart,iend,sep="_")) |>
+  dplyr::filter(nchar(sequence) >= 25)
+```
+
+# save intergenic and coding sequences for STREME
+## could used meme library but docker container required to run meme package on windows
+## just submit fastas to webapp
+```{r}
+to_fasta <- function(seqs, names, outname) {
+  
+  fasta <- Biostrings::DNAStringSet(seqs)
+  names(fasta) <- names
+  Biostrings::writeXStringSet(x = fasta,
+                              filepath = outname,
+                              format = "fasta")
+}
+
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/")
+#to_fasta(J1_intragenic$sequence, J1_intragenic$name, "J1_intragenic2.fasta")
+#to_fasta(J1_intergenic$sequence, J1_intergenic$name, "J1_intergenic2.fasta")
+to_fasta(filter(J1_intergenic, seqname %in% as_vector(acc2name[1:5,1]))$sequence,
+         filter(J1_intergenic, seqname %in% as_vector(acc2name[1:5,1]))$name,
+         "J1_intergenic2_subset5_minlen25.fasta")
+
+# "2" here represents un-reoriented sequences
+```
+
+# read in and clean up position-weight matrices for STREME motifs
+```{r}
+read_PWMs <- function(file) {
+  pset <- head(readLines(con = file)[-c(1:29)], -10)
+  pset <- subset(pset, !grepl(pattern = "letter", pset))
+  i1 <- nzchar(pset)
+  pset <- unname(split(pset[i1], cumsum(!i1)[i1]))
+  names(pset) <- gsub(pattern = " ",
+                      replacement = "_",
+                      x = unlist(lapply(pset, `[[`, 1)))
+  pset <- lapply(pset, function(x) { x[-1] })
+  pset <- lapply(pset, function(x) {
+    mat <- t(matrix(as.numeric(strsplit(paste(trimws(x),collapse=" "),split=" ")[[1]]),ncol=4,byrow=TRUE))
+    rownames(mat) <- c("A","C","G","T")
+    mat
+    })
+  pset
+}
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/")
+J1_pwms <- read_PWMs("STREME_J1_intergenic_v_intragenic_min5_max30_thresh0.05_29May2023.txt")
+```
+
+# visualize position of motifs across genomes
+```{r}
+plot_motifs <- function(pwm, DNAstrings, min_score, name_map) {
+  
+  require(Biostrings)
+  require(tidyverse)
+  require(ggseqlogo)
+  require(patchwork)
+  
+  seqdat <- lapply(X = seq_along(DNAstrings),
+         FUN = function(i) {
+           idna <- DNAstrings[i]
+           iseq <- idna[[1]]
+           fwdmatch <- matchPWM(pwm, iseq,
+                                min.score = paste0(min_score,"%"))
+           revmatch <- matchPWM(reverseComplement(pwm), iseq,
+                                min.score = paste0(min_score,"%"))
+           c(as.character(fwdmatch),
+             as.character(reverseComplement(revmatch)))
+         }) |> unlist()
+  
+  matchdat <- lapply(X = seq_along(DNAstrings),
+         FUN = function(i) {
+           idna <- DNAstrings[i]
+           acc <- names(idna)
+           glen <- nchar(idna)
+           iseq <- idna[[1]]
+           fwdmatch <- matchPWM(pwm, iseq,
+                                min.score = paste0(min_score,"%"))
+           revmatch <- matchPWM(reverseComplement(pwm), iseq,
+                                min.score = paste0(min_score,"%"))
+           bind_rows(tibble(start = start(fwdmatch),
+                           end = end(fwdmatch),
+                           strand = "+"),
+                     tibble(start = start(revmatch),
+                            end = end(revmatch),
+                            strand = "-")) |>
+             mutate(position = ((start + end) / 2) / glen,
+                    seqname = acc) |>
+             left_join(name_map, by = "seqname")
+         }) |> bind_rows()
+
+  logo <- ggseqlogo(seqdat)
+  
+  dist <- ggplot(data = matchdat) +
+    geom_segment(data = filter(matchdat, strand == "+"),
+              mapping = aes(x = position, xend = position),
+              color = "red",
+              y = 0, yend = Inf) +
+    geom_segment(data = filter(matchdat, strand == "-"),
+              mapping = aes(x = position, xend = position),
+              color = "blue",
+              y = -Inf, yend = 0) +
+    geom_hline(yintercept = 0,
+               color = "black") +
+    facet_grid(rows = vars(phage), switch = "y") + 
+    theme_bw() +
+    xlab("relative position in genome") +
+    scale_x_continuous(breaks = seq(0,1,0.1),
+                       limits = c(0,1),
+                       expand = c(0,0)) +
+    theme(axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.text.x = element_text(color = "black"),
+          axis.ticks.y = element_blank(),
+          panel.grid = element_blank(),
+          strip.background = element_rect(color = "black", fill = "white"),
+          strip.text.y.left = element_text(color = "black", size = 10, angle = 0))
+  
+  logo / plot_spacer() / dist + plot_layout(heights = c(1,-1.1,8))
+  
+}
+
+# subset genomes for only the 5 new phage
+plot_motifs(pwm = J1_pwms[[7]],
+            DNAstring = J1_DNAStringSet[which(names(J1_DNAStringSet) %in% as_vector(acc2name[1:5,1]))],
+            min_score = 95,
+            name_map = acc2name)
+```
+
+# iterate plot_motifs over all PWMs and save to PDFs
+```{r}
+# install.packages("qpdf")
+
+require(grDevices)
+require(qpdf)
+require(tidyverse)
+
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/intergenic_repeats/plots")
+lapply(seq_along(J1_pwms), function(x) {
+  
+  fname <- names(J1_pwms[x])
+  
+  p1 <- plot_motifs(pwm = J1_pwms[[x]],
+                    DNAstring = J1_DNAStringSet[which(names(J1_DNAStringSet) %in% as_vector(acc2name[1:5,1]))],
+                    min_score = 80,
+                    name_map = acc2name) +
+    plot_annotation(title = paste0(fname))
+  
+  ggsave(plot = p1,
+         filename = paste0(fname,"_partial.pdf"),
+         device = cairo_pdf, dpi = 600,
+         width = 8,
+         height = 4)
+  
+})
+
+
+pdflist <- list.files(path = ".", pattern = "_partial.pdf")
+qpdf::pdf_combine(input = pdflist,
+                  output = "J1_integenic_STREME_motifs_minscore80_30May2023_v3.pdf")
+do.call(file.remove, list(pdflist))
+```
+
+# limitation of STREME: max motif length 30 nt -- NOT USED
+## address this by associating adjacent sequences
+```{r}
+require(tidyverse)
+require(Biostrings)
+
+min_score <- 90
+
+J1_seqdat <-
+  lapply(X = seq_along(J1_DNAStringSet),
+         FUN = function(i) {
+           lapply(X = seq_along(J1_pwms),
+                  FUN = function(j) {
+             
+             iseq <- J1_DNAStringSet[i][[1]]
+             seqname <- names(J1_DNAStringSet[i])
+             ipwm <- J1_pwms[[j]]
+             pwmname <- names(J1_pwms[j])
+             fwdmatch <- matchPWM(ipwm, iseq,
+                                  min.score = paste0(min_score,"%"))
+             revmatch <- matchPWM(reverseComplement(ipwm), iseq,
+                                  min.score = paste0(min_score,"%"))
+             
+             bind_rows(tibble(start = start(fwdmatch),
+                              end = end(fwdmatch),
+                              strand = "+"),
+                       tibble(start = start(revmatch),
+                              end = end(revmatch),
+                              strand = "-")) |>
+               mutate(phage = seqname,
+                      pwm = pwmname)
+             
+             }) |> bind_rows()
+           }) |> bind_rows()
+  
+J1_matchdat <-
+  lapply(X = seq_along(DNAstrings),
+         FUN = function(i) {
+           idna <- DNAstrings[i]
+           acc <- names(idna)
+           glen <- nchar(idna)
+           iseq <- idna[[1]]
+           fwdmatch <- matchPWM(pwm, iseq,
+                                min.score = paste0(min_score,"%"))
+           revmatch <- matchPWM(reverseComplement(pwm), iseq,
+                                min.score = paste0(min_score,"%"))
+           bind_rows(tibble(start = start(fwdmatch),
+                            end = end(fwdmatch),
+                            strand = "+"),
+                     tibble(start = start(revmatch),
+                            end = end(revmatch),
+                            strand = "-")) |>
+             mutate(position = ((start + end) / 2) / glen,
+                    seqname = acc) |>
+             left_join(name_map, by = "seqname")
+           }) |> bind_rows()
+```
+
+
+
+
+# cluster intergenic sequences -- NOT USED
+```{r}
+clen  <- 20
+cdist <- 0.7
+
+seqs <- dplyr::filter(J1_intergenic, nchar(sequence) >= clen) |>
+  dplyr::select(sequence) |> as.vector() |> unlist()
+
+minlen <- min(nchar(seqs))
+
+dmat <- Biostrings::DNAStringSet(seqs) |>
+    Biostrings::stringDist(method = "levenshtein") / minlen
+
+clusters <- tidyr::tibble(spacer = seqs,
+                          cluster = stats::hclust(dmat, method = "complete") |>
+                            stats::cutree(h = cdist)) |>
+  dplyr::group_by(cluster) |> dplyr::mutate(count = n()) |> dplyr::ungroup()
+```
+
+# msa of intergenic sequences -- NOT USED
+```{r}
+J1_msa <- msa::msa(Biostrings::DNAStringSet(seqs), method = "Muscle")
+```
+
+# visualize genes -- NOT USED
+```{r}
+require(gggenes)
+J1_CDS |> 
+  dplyr::select(phage, phrog, start, end, strand) |>
+  dplyr::mutate(strand = ifelse(strand == "+", "forward", "reverse")) |>
+  dplyr::mutate(orientation = ifelse(strand == "forward", 1, 0)) |>
+  dplyr::mutate(phrog = ifelse(phrog == "No_PHROG", NA, phrog)) |> 
+  ggplot2::ggplot(mapping = aes(xmin = start,
+                                xmax = end,
+                                y = phage,
+                                fill = phrog,
+                                forward = orientation),
+                  vjust = (-2 * orientation) + 1) +
+  gggenes::geom_gene_arrow() +
+  ggplot2::facet_wrap(~ phage, scale = "free", ncol = 1) +
+  theme_genes() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(color = "black", size = 8),
+        axis.text.x = element_text(color = "black", size = 5),
+        axis.line.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+```
+
+
+
