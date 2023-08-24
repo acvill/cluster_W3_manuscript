@@ -1,0 +1,448 @@
+---
+title: "ggtree with binary data"
+author: "Albert Vill"
+date: "2023-07-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# load packages
+```{r, message=FALSE, warning=FALSE}
+# requires native pipe (R version >= 4.1)
+library(tidyverse) # v3.3.6
+library(ggtree) # v3.4.2
+library(ggtreeExtra) # v1.6.1
+library(ape) # v5.6.2
+library(phytools) # v1.0.3
+library(patchwork) # v1.1.2
+library(ggnewscale) # v0.4.8
+```
+
+# MOCK DATA
+
+## make an `m × n` binary matrix
+```{r}
+binmat <- function(m, n, prob) {
+  mat <- matrix(data = NA, nrow = m, ncol = n)
+  for (i in 1:m) {
+    mat[i,] <- rbinom(n = n, size = 1, prob = prob)
+  }
+  rownames(mat) <- paste0("N", sprintf(paste0("%0",nchar(m),"d"), 1:m))
+  mat
+}
+```
+
+## generate mock tree
+```{r}
+set.seed(123)
+tree <- binmat(m = 25, n = 50, prob = 0.7) |>
+  dist.gene(method = "pairwise") |>
+  nj()
+```
+
+## visualize rectangular tree
+```{r}
+ggtree(tree, layout = "rectangular") +
+  geom_tiplab(size = 4,
+              align = T,
+              linetype = "dotted",
+              linesize = 0.7,
+              offset = 1,
+              hjust = -0.1)
+```
+
+## color branches by clade membership
+```{r}
+# select clades by most recent common ancestor
+node1 <- findMRCA(tree, tips = c("N24","N04"))
+node2 <- findMRCA(tree, tips = c("N05","N16"))
+node3 <- findMRCA(tree, tips = c("N17","N13"))
+
+tree1 <- groupClade(tree,
+                    .node = c(node1, node2, node3),
+                    group_name = "clades")
+
+pal <- c("#000000","#00A08A","#F2AD00","#FF0000")
+
+ptree <- ggtree(tr = tree1,
+       mapping = aes(color = clades),
+       layout = "rectangular") +
+  geom_tiplab(size = 4,
+              align = T,
+              linetype = "dotted",
+              linesize = 0.7,
+              offset = 1,
+              hjust = -0.1) +
+  scale_color_manual(values = pal) +
+  geom_cladelabel(node = node1, label = "Clade X", 
+                  align = T,
+                  fontsize = 5,
+                  offset = 1.8,
+                  color = pal[2]) +
+  geom_cladelabel(node = node2, label = "Clade Y",
+                  align = T,
+                  fontsize = 5,
+                  offset = 1.8,
+                  color = pal[3]) +
+  geom_cladelabel(node = node3, label = "Clade Z",
+                  align = T,
+                  fontsize = 5,
+                  offset = 1.8,
+                  color = pal[4]) +
+  theme(legend.position = "none",
+        plot.margin = margin(0,30,0,0,"pt"))
+
+ptree + ggplot2::coord_cartesian(clip = "off")
+```
+
+# PHAM DATA
+
+## read in pham table and subset for non-orphams
+```{r}
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022/")
+#library(tidyverse)
+
+phamdat <- read_csv(file = "pham_table.txt",
+                    col_names = c("name", "acc", paste0("pham_",1:10312)))
+phamdat_noOrphams <- phamdat |> select(!where( ~ is.numeric(.x) && sum(.x) <= 1))
+```
+
+### which phams are unique to W3 phages
+```{r}
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/ani_aai_matrix/")
+acc2name <- readr::read_tsv(file = "acc2name.txt",
+                            col_names = c("seqname", "phage"))
+'%ni%' <- Negate("%in%")
+W3_phams <- phamdat |>
+  select(-name) |>
+  pivot_longer(cols = -acc) |>
+  filter(acc %ni% acc2name$seqname) |>
+  group_by(name) |>
+  summarise(sum = sum(value)) |>
+  filter(sum == 0) |>
+  select(name) |> as_vector()
+
+W3_phage2phams <- phamdat |>
+  select(-name) |>
+  pivot_longer(cols = -acc) |>
+  filter(name %in% W3_phams, acc %in% acc2name$seqname, value > 0) |>
+  left_join(rename(acc2name, acc = seqname)) |>
+  group_by(name) |>
+  summarize(sum = n(), phages = toString(sort(phage))) |>
+  rename(pham = name)
+```
+
+### create pham2protein and phage2prot mapping tables
+```{bash}
+cd /c/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022
+tar -xzvf pham_fastas.tar.gz
+cd pham_fastas
+while read fasta; do
+  pham=$(echo "${fasta}" | sed "s/.faa//g")
+  grep ">" ${fasta} | \
+  sed "s/^>/${pham}\t/g" | \
+  sed "s/_prot_/\t/g"
+done < <(ls | grep ".faa") > pham2protein.txt
+mv pham2protein.txt ../
+cd ..
+grep ">" Bacillus_355_db.faa | \
+  sed "s/>lcl|//g" | \
+  sed "s/\] \[/\t/g" | \
+  sed "s/ \[/\t/g" | \
+  sed "s/]$//g" | \
+  sed "s/_prot_/\t/g" > phage2prot2func.txt
+```
+
+### merge pham, protein, phage data
+```{r}
+setwd("C:/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022/")
+pham2prot <- read_tsv(file = "pham2protein.txt",
+                      col_names = c("pham","acc","protein"))
+phage2prot <- read_tsv(file = "phage2prot2func.txt",
+                       col_names = c("acc", "protein", "gene",
+                                     "locus", "function", "prot_id"))
+
+pham2function <- phage2prot |>
+  filter(acc %in% acc2name$seqname) |>
+  mutate(Function = ifelse(grepl("protein_id=", `function`), locus, `function`)) |>
+  select(acc, protein, Function) |>
+  mutate(Function = str_remove(Function, "protein=")) |>
+  left_join(pham2prot, by = c("acc", "protein")) |>
+  left_join(rename(acc2name, acc = seqname), by = "acc") |>
+  select(pham, Function) |> group_by(pham) |>
+  summarize(func = toString(sort(unique(Function)))) |>
+  ungroup()
+
+W3_pham2func <- left_join(W3_phage2phams, pham2function, by = "pham")
+write_tsv(x = W3_pham2func,
+          file = "C:/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/W3_unique_phams_functions.tsv")
+```
+
+### assign function to W3 unique phams
+
+## convert data to named matrix
+```{r}
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022/")
+toMat <- function(data) {
+  
+  rn <- data |> select(name) |> as_vector()
+  cn <- data |> select(-c(name,acc)) |> colnames()
+  mat <- data |> select(-c(name,acc)) |> as.matrix()
+  rownames(mat) <- rn
+  colnames(mat) <- cn
+  mat
+  
+}
+
+pmat_all <- toMat(phamdat)
+pmat_noOrphams <- toMat(phamdat_noOrphams)
+```
+
+## build nj tree
+```{r}
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022/")
+tree_all <- nj(dist.gene(x = pmat_all,method = "pairwise"))
+tree_noOrphams <- nj(dist.gene(x = pmat_noOrphams, method = "pairwise"))
+```
+
+## visualize tree
+```{r}
+rec_tree <- function(tree, tiplabs) {
+
+  pal <- c("#0000FF","#FF0000")
+  g2_node <- findMRCA(tree, tips = tiplabs)
+  tree1 <- groupClade(tree,
+                      .node = g2_node,
+                      group_name = "clades")
+  
+  pt <- ggtree(tree1,
+               layout = "rectangular",
+               branch.length = "none",
+               ladderize = T,
+               right = T,
+               mapping = aes(color = clades)) +
+    scale_color_manual(values = pal) +
+    theme(legend.position = 'none')
+  
+  pu <- ggtree(tree1,
+               layout = "rectangular",
+               branch.length = "none",
+               ladderize = T,
+               right = T,
+               mapping = aes(color = clades)) +
+    scale_color_manual(values = pal) +
+    theme(legend.position = 'none')
+  
+  # (pt + (viewClade(tree_view = pt,
+  #                  node = MRCA(pt, tiplabs),
+  #                  xmax_adjust = 15) +
+  #         geom_tiplab() +
+  #         theme(legend.position = 'none'))) &
+  #   theme(panel.border = element_rect(colour = "black",
+  #                                     size = 1,
+  #                                     fill = NA))
+
+  # pt + inset_element(viewClade(tree_view = pt,
+  #                              node = MRCA(pt, tiplabs),
+  #                              xmax_adjust = 15) +
+  #                      geom_tiplab() +
+  #                      theme(legend.position = 'none') +
+  #                      theme(panel.border = element_rect(colour = "black",
+  #                                                        size = 1,
+  #                                                        fill = NA)),
+  #                    left = 0,
+  #                    bottom = 0,
+  #                    right = 0.4,
+  #                    top = 0.4)
+  
+  open_tree(pt,90) + inset_element(viewClade(tree_view = pu,
+                               node = MRCA(pt, tiplabs),
+                               xmax_adjust = 15) +
+                       geom_tiplab() +
+                       theme(legend.position = 'none') +
+                       theme(panel.border = element_rect(colour = "black",
+                                                         size = 2,
+                                                         fill = NA)),
+                     left = 0.55,
+                     bottom = 0.10,
+                     right = 0.9,
+                     top = 0.45)
+  
+}
+
+g2 <- c("019DV002","019DV004","056SW001B","276BB001",
+        "280BB001","274BB002","268TH004")
+print_all <- rec_tree(tree_all, g2)
+print_sub <- rec_tree(tree_noOrphams, g2)
+
+print_all
+print_sub
+```
+
+### ggsave
+```{r}
+#library(svglite)
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_14Oct2022/trees/")
+
+# include shape, branch length, pham set, version
+ggsave(filename = "BacillusPhageTree_circ_allPhams_noBranchLength_v3.pdf",
+       plot = print_all, width = 10, height = 10, units = "in")
+ggsave(filename = "BacillusPhageTree_circ_noOrphams_noBranchLength_v3.pdf",
+       plot = print_sub, width = 10, height = 10, units = "in")
+```
+
+## read in bacphlip data and get phage names from pham data
+```{r}
+# Virulent = 1 - Temperate
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-52Kb/phammseqs_17Oct2022/")
+bacdat <- read_tsv(file = "Bacillus_355_db.fna.bacphlip", col_names = T) |>
+  rename(acc = ...1, virulent = Virulent) |> select(acc, virulent) |>
+  left_join(phamdat |> select(name, acc), by = "acc")
+
+# check distribution
+bacdat |> select(virulent) |> as_vector() |> hist(breaks = 20)
+
+# enframe Geobacillus squares
+gb_names <- c("GBK1","GBK2","GBSV1","TP-84","GVE2","GVE3")
+
+gb_nodedat <- sapply(gb_names, function(x)
+  {which(tree_noOrphams$tip.label == x)
+  }) |>
+  enframe() |> rename(node = value) |> mutate(frame = "geo")
+
+bacdat <- bacdat |> left_join(gb_nodedat) |> mutate(frame = ifelse(is.na(frame), "not_geo", "geo"))
+```
+
+## create a tree with bacphlip annotation
+```{r}
+anno_tree <- function(tree, highlight, ringdat, tiplist) {
+
+  pal <- c("#808080","#FF0000","#0000FF")
+  
+  pt <- ggtree(tree,
+               layout = "rectangular",
+               branch.length = "none",
+               ladderize = T,
+               right = T,
+               mapping = aes(color = clades)) +
+    scale_color_manual(values = pal) +
+    geom_tiplab2(align = TRUE,
+                  linetype = 3,
+                   size = 1,
+                   linesize = 0.2,
+                   show.legend = FALSE,
+                   offset = 2) +
+    ggnewscale::new_scale_color() +
+    geom_fruit(data = ringdat,
+               geom = geom_tile,
+               mapping = aes(y = name, fill = virulent, color = frame),
+               width = 0.8, height = 0.8) +
+    scale_color_discrete(type = c("black","white")) +
+    scale_fill_gradient2(high = "#ef8a62", low = "#67a9cf",
+                         mid = "#f7f7f7", midpoint = 0.5,
+                         guide = guide_colorbar(label = TRUE,
+                                              frame.colour = "black",
+                                              ticks = TRUE,
+                                              nbin = 100,
+                                              label.position = "bottom",
+                                              ticks.colour = "black",
+                                              #barwidth = 13,
+                                              barheight = 1.3,
+                                              direction = 'horizontal'))
+    # geom_fruit(data = tipdat,
+    #            geom = geom_point,
+    #            mapping = aes(y = name),
+    #            size = 1.5,
+    #            show.legend = FALSE,
+    #            pch = 20,
+    #            color = "black")
+    
+  
+  pu <- ggtree(tree,
+               layout = "rectangular",
+               branch.length = "none",
+               ladderize = T,
+               right = T,
+               mapping = aes(color = clades)) +
+    scale_color_manual(values = pal) +
+    theme(legend.position = 'none')
+  
+  # (pt + (viewClade(tree_view = pt,
+  #                  node = MRCA(pt, tiplabs),
+  #                  xmax_adjust = 15) +
+  #         geom_tiplab() +
+  #         theme(legend.position = 'none'))) &
+  #   theme(panel.border = element_rect(colour = "black",
+  #                                     size = 1,
+  #                                     fill = NA))
+
+  # pt + inset_element(viewClade(tree_view = pt,
+  #                              node = MRCA(pt, tiplabs),
+  #                              xmax_adjust = 15) +
+  #                      geom_tiplab() +
+  #                      theme(legend.position = 'none') +
+  #                      theme(panel.border = element_rect(colour = "black",
+  #                                                        size = 1,
+  #                                                        fill = NA)),
+  #                    left = 0,
+  #                    bottom = 0,
+  #                    right = 0.4,
+  #                    top = 0.4)
+  
+  open_tree(pt,90) +
+    patchwork::inset_element(
+      p = ggtree::viewClade(tree_view = pu,
+                            node = ggtree::MRCA(pu, highlight),
+                            xmax_adjust = 30) +
+        geom_tiplab() +
+        theme(legend.position = 'none') +
+        theme(panel.border = element_rect(colour = "black",
+                                          size = 2,
+                                          fill = NA)),
+      left = 0.55,
+      bottom = 0.10,
+      right = 0.9,
+      top = 0.45)
+  
+}
+
+# add clade annotations to tree before plotting
+
+# g2_node <- findMRCA(tree_noOrphams, tips = c("019DV002","019DV004","056SW001B","276BB001",
+#                                              "280BB001","274BB002","268TH004"))
+
+# j1_node_extra  <- findMRCA(tree_noOrphams,
+#                            tips = c("010DV004","010DV005","035JT004","043JT007",
+#                                     "278BB001","phiNIT1_DNA", "Grass", "BSP10",
+#                                     "BSP9", "BSTP3"))
+
+j1_node <- findMRCA(tree_noOrphams, tips = c("010DV004","010DV005","035JT004",
+                                             "043JT007", "278BB001"))
+
+tree_noOrphams2 <- groupClade(tree_noOrphams,
+                              .node = c(j1_node),
+                              group_name = "clades")
+
+tohilite <- findMRCA(tree_noOrphams2, tips = c("010DV004","010DV005","035JT004",
+                                             "043JT007", "278BB001"))
+
+print_annot <- anno_tree(tree = tree_noOrphams2,
+                         highlight = tohilite,
+                         ringdat = bacdat,
+                         tiplist = c("010DV004","010DV005","035JT004",
+                                             "043JT007", "278BB001"))
+
+print_annot
+```
+
+## ggsave
+```{r}
+#library(svglite)
+setwd("/Users/acvill/Dropbox/Phage/BacillusPaper-150Kb/J1_PhiNIT1/tree_hgt/")
+
+# include shape, branch length, pham set, version
+ggsave(filename = "BacillusPhageTree_circ_noOrphams_noBranchLength_v2.pdf",
+       device = cairo_pdf,
+       plot = print_annot, width = 10, height = 10, units = "in")
+```
