@@ -1,4 +1,4 @@
-https://doi.org/10.1089/phage.2022.0030
+https://doi.org/10.1089/phage.2023.0027
 
 # cluster_W3_manuscript
 This repository contains code and data related to our manuscript on *Bacillus* phage subcluster W3, including
