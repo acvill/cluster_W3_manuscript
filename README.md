@@ -1,3 +1,5 @@
+https://doi.org/10.1089/phage.2022.0030
+
 # cluster_W3_manuscript
 This repository contains code and data related to our manuscript on *Bacillus* phage subcluster W3, including
 - a [list of phage names and accession numbers](https://github.com/acvill/cluster_W3_manuscript/blob/main/data/Bacillus_phage.txt) used to construct the PhaMMseqs database
